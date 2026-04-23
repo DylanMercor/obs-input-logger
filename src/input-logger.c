@@ -391,6 +391,27 @@ void input_logger_start(const char *target_video_path)
 		return;
 	}
 
+	/* Header line so readers can identify the producing build. Schema-compatible
+	 * with the sample format (just an extra "meta" key unknown readers ignore). */
+	fprintf(g_il.fp,
+		"{\"meta\": \"obs-input-logger\", \"version\": \"%s\", \"platform\": \"%s\", \"mouse_source\": \"%s\"}\n",
+		PLUGIN_VERSION,
+#ifdef _WIN32
+		"windows",
+#elif defined(__APPLE__)
+		"macos",
+#else
+		"linux",
+#endif
+#ifdef _WIN32
+		"rawinput"
+#elif defined(__APPLE__)
+		"cgeventtap"
+#else
+		"none"
+#endif
+	);
+
 	/* Reset ring + counters + held-state tracker. */
 	pthread_mutex_lock(&g_il.push_mtx);
 	g_il.head = 0;
