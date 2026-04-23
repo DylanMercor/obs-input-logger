@@ -1,0 +1,278 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>OBS Input Logger — Viewer</title>
+<style>
+  :root {
+    --bg: #0f1115;
+    --panel: #171a21;
+    --panel2: #1f232c;
+    --text: #e6e8ec;
+    --muted: #8a93a6;
+    --accent: #4ea0ff;
+    --key: #2a3040;
+    --key-active: #4ea0ff;
+    --mouse: #7be495;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; height: 100%; background: var(--bg); color: var(--text);
+    font: 13px/1.4 -apple-system, system-ui, Segoe UI, Roboto, sans-serif; }
+  header { padding: 10px 14px; background: var(--panel); border-bottom: 1px solid #252b35; display: flex;
+    gap: 12px; align-items: center; flex-wrap: wrap; }
+  header h1 { margin: 0; font-size: 14px; font-weight: 600; color: var(--muted); letter-spacing: .5px; }
+  .filepick { display: inline-flex; gap: 6px; align-items: center; }
+  .filepick label { background: var(--panel2); padding: 6px 10px; border-radius: 6px; cursor: pointer;
+    border: 1px solid #2a3140; }
+  .filepick label:hover { border-color: var(--accent); color: var(--accent); }
+  .filepick span { color: var(--muted); font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 11px; }
+  input[type=file] { display: none; }
+  #sync { display: inline-flex; gap: 6px; align-items: center; }
+  #sync input { width: 80px; background: var(--panel2); color: var(--text); border: 1px solid #2a3140;
+    border-radius: 4px; padding: 4px 6px; font-family: ui-monospace, Menlo, Consolas, monospace; }
+  main { display: grid; grid-template-columns: 1fr 360px; gap: 12px; padding: 12px; height: calc(100% - 54px); }
+  .videoWrap { position: relative; background: #000; border-radius: 8px; overflow: hidden; min-height: 300px;
+    display: flex; align-items: center; justify-content: center; }
+  video { max-width: 100%; max-height: 100%; display: block; }
+  .hudRight { display: flex; flex-direction: column; gap: 12px; overflow: hidden; }
+  .panel { background: var(--panel); border-radius: 8px; padding: 10px 12px; border: 1px solid #242a35; }
+  .panel h2 { margin: 0 0 8px; font-size: 11px; font-weight: 600; color: var(--muted); letter-spacing: .5px;
+    text-transform: uppercase; }
+  .keyboard { display: grid; grid-template-columns: repeat(12, 1fr); gap: 3px; }
+  .key { background: var(--key); padding: 6px 0; border-radius: 4px; text-align: center; font-family:
+    ui-monospace, Menlo, Consolas, monospace; font-size: 11px; color: var(--muted); border: 1px solid #242a35; }
+  .key.active { background: var(--key-active); color: #000; border-color: var(--key-active); font-weight: 700; }
+  .mouseArea { position: relative; height: 160px; background: var(--panel2); border-radius: 6px; overflow: hidden; }
+  .mouseDot { position: absolute; width: 10px; height: 10px; border-radius: 50%; background: var(--mouse);
+    box-shadow: 0 0 10px var(--mouse); transform: translate(-50%, -50%); transition: left 30ms linear, top 30ms linear; }
+  .btnRow { display: flex; gap: 6px; margin-top: 8px; font-family: ui-monospace, Menlo, Consolas, monospace;
+    font-size: 11px; }
+  .btn { flex: 1; background: var(--key); color: var(--muted); padding: 4px 0; text-align: center;
+    border-radius: 4px; border: 1px solid #242a35; }
+  .btn.active { background: var(--mouse); color: #000; border-color: var(--mouse); font-weight: 700; }
+  .eventLog { flex: 1; min-height: 0; overflow: auto; font-family: ui-monospace, Menlo, Consolas, monospace;
+    font-size: 11px; }
+  .eventLog .row { padding: 2px 0; border-bottom: 1px solid #1c2128; color: var(--muted); white-space: nowrap; }
+  .eventLog .row.kb { color: #ffd479; }
+  .eventLog .row.mb { color: var(--mouse); }
+  .eventLog .row.mm { color: #8a93a6; }
+  .stats { display: grid; grid-template-columns: 1fr 1fr; gap: 4px 12px; font-family: ui-monospace, Menlo,
+    Consolas, monospace; font-size: 11px; }
+  .stats div span { color: var(--muted); }
+  .empty { color: var(--muted); padding: 20px; text-align: center; }
+</style>
+</head>
+<body>
+<header>
+  <h1>OBS INPUT LOGGER · VIEWER</h1>
+  <div class="filepick">
+    <label for="videoInput">🎬 Video</label>
+    <input id="videoInput" type="file" accept="video/*">
+    <span id="videoName">(none)</span>
+  </div>
+  <div class="filepick">
+    <label for="jsonlInput">📜 Input log (.jsonl)</label>
+    <input id="jsonlInput" type="file" accept=".jsonl,.json,application/json,text/plain">
+    <span id="jsonlName">(none)</span>
+  </div>
+  <div id="sync">
+    <label for="offset" style="color:var(--muted)">offset (ms)</label>
+    <input id="offset" type="number" value="0" step="10">
+  </div>
+</header>
+<main>
+  <div class="videoWrap">
+    <video id="video" controls playsinline></video>
+  </div>
+  <aside class="hudRight">
+    <section class="panel">
+      <h2>Keyboard</h2>
+      <div class="keyboard" id="kb"></div>
+    </section>
+    <section class="panel">
+      <h2>Mouse</h2>
+      <div class="mouseArea" id="mouseArea">
+        <div class="mouseDot" id="mouseDot" style="left:50%; top:50%"></div>
+      </div>
+      <div class="btnRow">
+        <div class="btn" data-btn="mouse_left">L</div>
+        <div class="btn" data-btn="mouse_middle">M</div>
+        <div class="btn" data-btn="mouse_right">R</div>
+        <div class="btn" data-btn="mouse_x1">X1</div>
+        <div class="btn" data-btn="mouse_x2">X2</div>
+      </div>
+      <div class="stats" style="margin-top:8px">
+        <div><span>dx/s</span> <b id="statDx">0</b></div>
+        <div><span>dy/s</span> <b id="statDy">0</b></div>
+      </div>
+    </section>
+    <section class="panel" style="display:flex; flex-direction:column; flex:1; min-height:0;">
+      <h2>Recent events</h2>
+      <div class="eventLog" id="eventLog"><div class="empty">Load a video and a .jsonl log to begin.</div></div>
+    </section>
+  </aside>
+</main>
+<script>
+// ---------- state ----------
+let events = [];   // sorted by t (µs)
+let video = document.getElementById('video');
+let offsetInput = document.getElementById('offset');
+let eventLog = document.getElementById('eventLog');
+let kbEl = document.getElementById('kb');
+let dot = document.getElementById('mouseDot');
+let statDx = document.getElementById('statDx');
+let statDy = document.getElementById('statDy');
+
+// Build a compact on-screen keyboard (rows mirror a common 60%)
+const KB_ROWS = [
+  ['escape','1','2','3','4','5','6','7','8','9','0','backspace'],
+  ['tab','q','w','e','r','t','y','u','i','o','p','backslash'],
+  ['capslock','a','s','d','f','g','h','j','k','l','semicolon','return'],
+  ['shift','z','x','c','v','b','n','m','comma','period','slash','shift_r'],
+  ['ctrl','win','alt','space','alt_r','win_r','ctrl_r','left','up','down','right','f1']
+];
+const keyEls = {};
+for (const row of KB_ROWS) for (const k of row) {
+  const el = document.createElement('div');
+  el.className = 'key';
+  el.textContent = k.length > 4 ? k.slice(0,3) : k;
+  el.title = k;
+  kbEl.appendChild(el);
+  keyEls[k] = el;
+}
+const btnEls = {};
+document.querySelectorAll('.btn').forEach(b => btnEls[b.dataset.btn] = b);
+
+// ---------- file loading ----------
+document.getElementById('videoInput').addEventListener('change', e => {
+  const f = e.target.files[0]; if (!f) return;
+  video.src = URL.createObjectURL(f);
+  document.getElementById('videoName').textContent = f.name;
+});
+document.getElementById('jsonlInput').addEventListener('change', async e => {
+  const f = e.target.files[0]; if (!f) return;
+  const text = await f.text();
+  events = [];
+  for (const line of text.split(/\r?\n/)) {
+    if (!line.trim()) continue;
+    try { events.push(JSON.parse(line)); } catch {}
+  }
+  events.sort((a,b) => a.t - b.t);
+  document.getElementById('jsonlName').textContent = `${f.name} — ${events.length} events`;
+  eventLog.innerHTML = '';
+});
+
+// ---------- playback driver ----------
+// Strategy: every animation frame, compute current video time (µs), then replay
+// every event between lastIdx and the new target index. This keeps the display
+// perfectly in sync with seeking, pausing, and playback-rate changes.
+
+let lastIdx = 0;
+let lastTimeUs = -1;
+let moveAccumDx = 0, moveAccumDy = 0, moveAccumLast = 0;
+const held = new Set();     // currently-down keys/buttons
+const recentRows = [];
+
+function videoTimeUs() {
+  return Math.round((video.currentTime * 1_000_000) - (parseInt(offsetInput.value||'0',10) * 1000));
+}
+
+function findIdxAt(tUs) {
+  // binary search — first event with t > tUs
+  let lo = 0, hi = events.length;
+  while (lo < hi) {
+    const m = (lo + hi) >> 1;
+    if (events[m].t <= tUs) lo = m + 1; else hi = m;
+  }
+  return lo;
+}
+
+function resetToTime(tUs) {
+  held.clear();
+  for (const el of Object.values(keyEls)) el.classList.remove('active');
+  for (const el of Object.values(btnEls)) el.classList.remove('active');
+  // Replay all state-changing events up to tUs so key-held state is correct.
+  const end = findIdxAt(tUs);
+  for (let i = 0; i < end; i++) apply(events[i], /*silent=*/true);
+  lastIdx = end;
+  dot.style.left = '50%'; dot.style.top = '50%';
+  // keep recentRows as-is
+}
+
+function apply(ev, silent) {
+  if (ev.type === 'key' || ev.type === 'button') {
+    const el = ev.type === 'key' ? keyEls[ev.vk] : btnEls[ev.vk];
+    if (ev.state === 'down') {
+      held.add(ev.vk);
+      if (el) el.classList.add('active');
+    } else {
+      held.delete(ev.vk);
+      if (el) el.classList.remove('active');
+    }
+    if (!silent) pushRow(ev);
+  } else if (ev.type === 'move') {
+    // Integrate deltas into an on-screen dot within a 160×160 area.
+    const area = document.getElementById('mouseArea').getBoundingClientRect();
+    const w = area.width, h = area.height;
+    const x = parseFloat(dot.style.left) / 100 * w + ev.dx;
+    const y = parseFloat(dot.style.top)  / 100 * h + ev.dy;
+    // Clamp + wrap softly back toward center
+    const nx = Math.max(4, Math.min(w - 4, x));
+    const ny = Math.max(4, Math.min(h - 4, y));
+    dot.style.left = (nx / w * 100) + '%';
+    dot.style.top  = (ny / h * 100) + '%';
+    moveAccumDx += ev.dx; moveAccumDy += ev.dy;
+  } else if (ev.type === 'wheel') {
+    if (!silent) pushRow(ev);
+  }
+}
+
+function pushRow(ev) {
+  const cls = ev.type === 'key' ? 'kb' : (ev.type === 'button' ? 'mb' : 'mm');
+  const t = (ev.t / 1_000_000).toFixed(3);
+  let msg;
+  if (ev.type === 'key')    msg = `${t}s  kb    ${ev.vk} ${ev.state}`;
+  else if (ev.type === 'button') msg = `${t}s  mb    ${ev.vk} ${ev.state}`;
+  else if (ev.type === 'wheel')  msg = `${t}s  wheel dx=${ev.dx} dy=${ev.dy}`;
+  else                           msg = `${t}s  ${ev.type}`;
+  const row = document.createElement('div');
+  row.className = 'row ' + cls;
+  row.textContent = msg;
+  eventLog.appendChild(row);
+  recentRows.push(row);
+  if (recentRows.length > 200) { const old = recentRows.shift(); old.remove(); }
+  eventLog.scrollTop = eventLog.scrollHeight;
+}
+
+function frame() {
+  if (events.length) {
+    const tUs = videoTimeUs();
+    // Seek backward? — rebuild state.
+    if (tUs < lastTimeUs - 50_000) {
+      resetToTime(tUs);
+    } else {
+      const target = findIdxAt(tUs);
+      for (let i = lastIdx; i < target; i++) apply(events[i], false);
+      lastIdx = target;
+    }
+    lastTimeUs = tUs;
+
+    // dx/dy per-second readout (updated ~5Hz)
+    if (performance.now() - moveAccumLast > 200) {
+      const dt = (performance.now() - moveAccumLast) / 1000;
+      statDx.textContent = Math.round(moveAccumDx / dt);
+      statDy.textContent = Math.round(moveAccumDy / dt);
+      moveAccumDx = moveAccumDy = 0;
+      moveAccumLast = performance.now();
+    }
+  }
+  requestAnimationFrame(frame);
+}
+
+video.addEventListener('seeking', () => { lastTimeUs = -1; });
+video.addEventListener('ratechange', () => { lastTimeUs = -1; });
+moveAccumLast = performance.now();
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>

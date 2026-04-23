@@ -8,6 +8,7 @@
 !/data
 !/installer
 !/src
+!/tools
 !.clang-format
 !.gersemirc
 !.gitignore
