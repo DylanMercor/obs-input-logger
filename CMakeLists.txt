@@ -4,7 +4,8 @@ include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/common/bootstrap.cmake" NO_POLICY_SCO
 
 project(${_name} VERSION ${_version})
 
-option(ENABLE_FRONTEND_API "Use obs-frontend-api for UI functionality" ON)
+# Frontend API is required — we wire into RECORDING_STARTED/STOPPED events.
+set(ENABLE_FRONTEND_API ON CACHE BOOL "Use obs-frontend-api for UI functionality" FORCE)
 option(ENABLE_QT "Use Qt functionality" OFF)
 
 include(compilerconfig)
@@ -16,10 +17,8 @@ add_library(${CMAKE_PROJECT_NAME} MODULE)
 find_package(libobs REQUIRED)
 target_link_libraries(${CMAKE_PROJECT_NAME} PRIVATE OBS::libobs)
 
-if(ENABLE_FRONTEND_API)
-  find_package(obs-frontend-api REQUIRED)
-  target_link_libraries(${CMAKE_PROJECT_NAME} PRIVATE OBS::obs-frontend-api)
-endif()
+find_package(obs-frontend-api REQUIRED)
+target_link_libraries(${CMAKE_PROJECT_NAME} PRIVATE OBS::obs-frontend-api)
 
 if(ENABLE_QT)
   find_package(Qt6 COMPONENTS Widgets Core)
@@ -34,23 +33,14 @@ if(ENABLE_QT)
   )
 endif()
 
-target_sources(
-  ${CMAKE_PROJECT_NAME}
-  PRIVATE
-    src/plugin-main.c
-    src/input-logger.c
-)
+target_sources(${CMAKE_PROJECT_NAME} PRIVATE src/plugin-main.c src/input-logger.c)
 
 if(APPLE)
   target_sources(${CMAKE_PROJECT_NAME} PRIVATE src/hooks-macos.m)
   set_source_files_properties(src/hooks-macos.m PROPERTIES COMPILE_FLAGS "-fobjc-arc")
   target_link_libraries(
     ${CMAKE_PROJECT_NAME}
-    PRIVATE
-      "-framework Cocoa"
-      "-framework ApplicationServices"
-      "-framework CoreGraphics"
-      "-framework CoreFoundation"
+    PRIVATE "-framework Cocoa" "-framework ApplicationServices" "-framework CoreGraphics" "-framework CoreFoundation"
   )
 elseif(WIN32)
   target_sources(${CMAKE_PROJECT_NAME} PRIVATE src/hooks-windows.c)

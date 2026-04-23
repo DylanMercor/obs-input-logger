@@ -60,10 +60,9 @@ static struct {
 	uint32_t tail; /* next read slot  */
 	pthread_mutex_t push_mtx;
 
-	/* Writer thread wake signal. */
+	/* Writer thread wake signal (OBS portable event — works on MSVC/mingw/clang). */
 	pthread_t writer_thr;
-	pthread_mutex_t wake_mtx;
-	pthread_cond_t wake_cv;
+	os_event_t *wake_evt;
 
 	/* Output. */
 	char *out_path;
@@ -106,11 +105,8 @@ static inline void il_push(il_event_t ev)
 	}
 	pthread_mutex_unlock(&g_il.push_mtx);
 
-	if (wake) {
-		pthread_mutex_lock(&g_il.wake_mtx);
-		pthread_cond_signal(&g_il.wake_cv);
-		pthread_mutex_unlock(&g_il.wake_mtx);
-	}
+	if (wake)
+		os_event_signal(g_il.wake_evt);
 }
 
 void input_logger_push_key(uint64_t t_us, const char *vk_name, bool down)
@@ -201,18 +197,8 @@ static void *il_writer_main(void *arg)
 
 	/* Drain loop: sleep up to 50ms, then flush whatever arrived. */
 	for (;;) {
-		struct timespec ts;
-		clock_gettime(CLOCK_REALTIME, &ts);
-		ts.tv_nsec += 50L * 1000L * 1000L;
-		if (ts.tv_nsec >= 1000000000L) {
-			ts.tv_nsec -= 1000000000L;
-			ts.tv_sec += 1;
-		}
-
-		pthread_mutex_lock(&g_il.wake_mtx);
-		pthread_cond_timedwait(&g_il.wake_cv, &g_il.wake_mtx, &ts);
-		pthread_mutex_unlock(&g_il.wake_mtx);
-
+		(void)os_event_timedwait(g_il.wake_evt, 50);
+		os_event_reset(g_il.wake_evt);
 		bool should_exit = os_atomic_load_bool(&g_il.writer_should_exit);
 
 		/* Snapshot head, drain up to there in bursts. */
@@ -302,8 +288,11 @@ bool input_logger_module_load(void)
 	memset(&g_il, 0, sizeof(g_il));
 	g_il.ring = bzalloc(sizeof(il_event_t) * IL_RING_CAPACITY);
 	pthread_mutex_init(&g_il.push_mtx, NULL);
-	pthread_mutex_init(&g_il.wake_mtx, NULL);
-	pthread_cond_init(&g_il.wake_cv, NULL);
+	if (os_event_init(&g_il.wake_evt, OS_EVENT_TYPE_MANUAL) != 0) {
+		bfree(g_il.ring);
+		g_il.ring = NULL;
+		return false;
+	}
 	return g_il.ring != NULL;
 }
 
@@ -313,8 +302,10 @@ void input_logger_module_unload(void)
 	bfree(g_il.ring);
 	g_il.ring = NULL;
 	pthread_mutex_destroy(&g_il.push_mtx);
-	pthread_mutex_destroy(&g_il.wake_mtx);
-	pthread_cond_destroy(&g_il.wake_cv);
+	if (g_il.wake_evt) {
+		os_event_destroy(g_il.wake_evt);
+		g_il.wake_evt = NULL;
+	}
 }
 
 void input_logger_start(const char *target_video_path)
@@ -344,6 +335,7 @@ void input_logger_start(const char *target_video_path)
 	os_atomic_store_bool(&g_il.writer_should_exit, false);
 	g_il.start_ns = os_gettime_ns();
 	os_atomic_store_bool(&g_il.active, true);
+	os_event_reset(g_il.wake_evt);
 
 	pthread_create(&g_il.writer_thr, NULL, il_writer_main, NULL);
 
@@ -363,9 +355,7 @@ void input_logger_stop(void)
 
 	/* Signal writer to drain & exit. */
 	os_atomic_store_bool(&g_il.writer_should_exit, true);
-	pthread_mutex_lock(&g_il.wake_mtx);
-	pthread_cond_signal(&g_il.wake_cv);
-	pthread_mutex_unlock(&g_il.wake_mtx);
+	os_event_signal(g_il.wake_evt);
 	pthread_join(g_il.writer_thr, NULL);
 
 	if (g_il.fp) {
