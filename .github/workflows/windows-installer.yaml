@@ -77,11 +77,9 @@ jobs:
           $staging = (Resolve-Path "release\staging").Path
           $null = New-Item -ItemType Directory -Force -Path $outDir
 
-          $defines = @"
-#define MyAppVersion "$env:VERSION"
-#define StagingDir "$staging"
-"@
-          Set-Content -Path "installer\defines.isi" -Value $defines -Encoding ASCII
+          $defines  = '#define MyAppVersion "' + $env:VERSION + '"' + [Environment]::NewLine
+          $defines += '#define StagingDir "' + $staging + '"' + [Environment]::NewLine
+          Set-Content -Path "installer\defines.isi" -Value $defines -Encoding ASCII -NoNewline
           Get-Content "installer\defines.isi"
 
           & $iscc "/O$outDir" "installer\obs-input-logger.iss"
