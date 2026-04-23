@@ -71,8 +71,10 @@ jobs:
           if (-not $iscc -or -not (Test-Path $iscc)) {
             throw "Inno Setup (ISCC.exe) not found on this runner."
           }
-          & $iscc /DMyAppVersion=$env:VERSION installer\obs-input-logger.iss
-          if ($LASTEXITCODE -ne 0) { throw "ISCC failed" }
+          # Ensure output dir exists (the .iss OutputDir is relative to the .iss file)
+          $null = New-Item -ItemType Directory -Force -Path release
+          & $iscc /DMyAppVersion=$env:VERSION /O+ "/Orelease" "installer\obs-input-logger.iss"
+          if ($LASTEXITCODE -ne 0) { throw "ISCC failed with code $LASTEXITCODE" }
 
           Get-ChildItem release\*.exe
 
