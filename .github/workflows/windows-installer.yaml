@@ -1,0 +1,83 @@
+name: Build Windows Installer
+on:
+  workflow_call:
+  push:
+    branches: [main, master]
+    tags: ['*']
+
+permissions:
+  contents: read
+
+jobs:
+  installer:
+    name: Build Windows double-click installer 📦
+    runs-on: windows-2022
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read plugin metadata 🔎
+        id: meta
+        run: |
+          $spec = Get-Content -Raw buildspec.json | ConvertFrom-Json
+          "pluginName=$($spec.name)" >> $env:GITHUB_OUTPUT
+          "pluginVersion=$($spec.version)" >> $env:GITHUB_OUTPUT
+          "commitHash=$($env:GITHUB_SHA.Substring(0,9))" >> $env:GITHUB_OUTPUT
+
+      - name: Set up MSVC 🛠️
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Configure + build plugin 🧱
+        run: |
+          cmake --preset windows-x64
+          cmake --build --preset windows-x64 --config RelWithDebInfo
+
+      - name: Stage files for installer 🗂️
+        run: |
+          $stage = "release\staging"
+          $null = New-Item -ItemType Directory -Force -Path "$stage\bin\64bit"
+          $null = New-Item -ItemType Directory -Force -Path "$stage\data"
+
+          # Find DLL (and optional PDB) under build_x64\
+          $dll = Get-ChildItem build_x64 -Recurse -Filter obs-input-logger.dll |
+                 Where-Object { $_.FullName -notmatch '\\CMakeFiles\\' } |
+                 Select-Object -First 1
+          if (-not $dll) { throw "obs-input-logger.dll not found under build_x64\" }
+          Copy-Item -Force $dll.FullName "$stage\bin\64bit\"
+
+          $pdb = Get-ChildItem build_x64 -Recurse -Filter obs-input-logger.pdb -ErrorAction SilentlyContinue |
+                 Where-Object { $_.FullName -notmatch '\\CMakeFiles\\' } |
+                 Select-Object -First 1
+          if ($pdb) { Copy-Item -Force $pdb.FullName "$stage\bin\64bit\" }
+
+          # Locale data
+          if (Test-Path data\locale) {
+            Copy-Item -Recurse -Force data\locale "$stage\data\locale"
+          }
+
+          Get-ChildItem $stage -Recurse | Select-Object FullName
+
+      - name: Compile installer with Inno Setup 📦
+        env:
+          VERSION: ${{ steps.meta.outputs.pluginVersion }}
+        run: |
+          # Inno Setup 6 is preinstalled on windows-2022 runners
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) {
+            $iscc = (Get-Command iscc -ErrorAction SilentlyContinue).Source
+          }
+          if (-not $iscc -or -not (Test-Path $iscc)) {
+            throw "Inno Setup (ISCC.exe) not found on this runner."
+          }
+          & $iscc /DMyAppVersion=$env:VERSION installer\obs-input-logger.iss
+          if ($LASTEXITCODE -ne 0) { throw "ISCC failed" }
+
+          Get-ChildItem release\*.exe
+
+      - name: Upload installer 📡
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.meta.outputs.pluginName }}-${{ steps.meta.outputs.pluginVersion }}-windows-x64-${{ steps.meta.outputs.commitHash }}-installer
+          path: release\*-setup.exe

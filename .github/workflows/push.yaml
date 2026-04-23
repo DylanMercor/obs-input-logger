@@ -25,11 +25,18 @@ jobs:
     permissions:
       contents: read
 
+  build-installer:
+    name: Build Installer 📦
+    uses: ./.github/workflows/windows-installer.yaml
+    needs: build-project
+    permissions:
+      contents: read
+
   create-release:
     name: Create Release 🛫
     if: github.ref_type == 'tag'
     runs-on: ubuntu-24.04
-    needs: build-project
+    needs: [build-project, build-installer]
     defaults:
       run:
         shell: bash
