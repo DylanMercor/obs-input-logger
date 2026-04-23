@@ -37,8 +37,11 @@ This matches `sample 1 input log.jsonl` exactly for `key` and `move` events;
   *Accessibility*) permission. Grant both in System Settings → Privacy &
   Security. Without these the `CGEventTap` call fails and no events are
   emitted (OBS itself still records normally).
-- **Windows**: Works out of the box; Low-Level hooks require no special
-  permission but are incompatible with some anti-cheat software.
+- **Windows**: Raw Input (`WM_INPUT`) is used for mouse — gives true HID
+  device deltas that bypass pointer acceleration and work when games put
+  the cursor into relative / captured mode. Keyboard uses `WH_KEYBOARD_LL`.
+  Works out of the box; low-level hooks are incompatible with some
+  kernel-mode anti-cheat.
 - **Linux**: Not implemented (see `src/hooks-linux.c`).
 
 ## Build

@@ -42,6 +42,22 @@ typedef struct {
 	const char *name; /* interned, non-owning */
 } il_event_t;
 
+/* Held-state tracker for keys and mouse buttons.
+ *
+ * The OS fires duplicate key-down events while a key is held (keyboard auto-
+ * repeat on Windows, kCGKeyboardEventAutorepeat on macOS), and occasionally
+ * delivers an "up" we never saw a "down" for (focus churn, modifier keys
+ * changing while a different app is foreground). We dedupe here so the log
+ * contains exactly one `down` per `up` per physical key press, with no
+ * orphaned `up` events.
+ *
+ * Keys held concurrently is tiny in practice (<10). Linear scan is fine. */
+#define IL_HELD_MAX 32
+typedef struct {
+	const char *name;  /* interned, non-owning */
+	uint8_t is_button; /* 1 = mouse button, 0 = keyboard */
+} il_held_t;
+
 static struct {
 	/* Lifecycle — cross-thread flag via OBS atomic bool helpers. */
 	volatile bool active;
@@ -53,12 +69,17 @@ static struct {
 	/* Counters. Protected by push_mtx (cheap — only touched in push + stop). */
 	uint64_t total_events;
 	uint64_t dropped;
+	uint64_t deduped; /* duplicate-down / orphan-up events swallowed */
 
 	/* Ring buffer — producer indices guarded by push_mtx. */
 	il_event_t *ring;
 	uint32_t head; /* next write slot */
 	uint32_t tail; /* next read slot  */
 	pthread_mutex_t push_mtx;
+
+	/* Held keys/buttons — also guarded by push_mtx. */
+	il_held_t held[IL_HELD_MAX];
+	int held_n;
 
 	/* Writer thread wake signal (OBS portable event — works on MSVC/mingw/clang). */
 	pthread_t writer_thr;
@@ -85,6 +106,42 @@ uint64_t input_logger_now_us(void)
 
 /* --- push path (hot) --- */
 
+/* Must be called with push_mtx held. Returns true if the state-change event
+ * (key/button down or up) should be emitted; false if it's a duplicate or
+ * orphan that we swallowed. */
+static bool il_dedup_locked(const il_event_t *ev)
+{
+	bool is_button = ev->kind == IL_EVT_MOUSE_BUTTON;
+	bool down = ev->flag != 0;
+
+	int idx = -1;
+	for (int i = 0; i < g_il.held_n; ++i) {
+		if (g_il.held[i].name == ev->name && (uint8_t)is_button == g_il.held[i].is_button) {
+			idx = i;
+			break;
+		}
+	}
+	if (down) {
+		if (idx >= 0) {
+			g_il.deduped++;
+			return false; /* already held — drop auto-repeat */
+		}
+		if (g_il.held_n < IL_HELD_MAX) {
+			g_il.held[g_il.held_n].name = ev->name;
+			g_il.held[g_il.held_n].is_button = (uint8_t)is_button;
+			g_il.held_n++;
+		}
+		return true;
+	} else {
+		if (idx < 0) {
+			g_il.deduped++;
+			return false; /* orphan up — drop */
+		}
+		g_il.held[idx] = g_il.held[--g_il.held_n];
+		return true;
+	}
+}
+
 static inline void il_push(il_event_t ev)
 {
 	if (!input_logger_is_active())
@@ -92,6 +149,16 @@ static inline void il_push(il_event_t ev)
 
 	bool wake = false;
 	pthread_mutex_lock(&g_il.push_mtx);
+
+	/* Dedup key/button events under the lock so held-state reads and writes
+	 * stay consistent with the ring write. */
+	if (ev.kind == IL_EVT_KEY || ev.kind == IL_EVT_MOUSE_BUTTON) {
+		if (!il_dedup_locked(&ev)) {
+			pthread_mutex_unlock(&g_il.push_mtx);
+			return;
+		}
+	}
+
 	uint32_t head = g_il.head;
 	uint32_t tail = g_il.tail;
 	if ((uint32_t)(head - tail) >= IL_RING_CAPACITY) {
@@ -324,12 +391,14 @@ void input_logger_start(const char *target_video_path)
 		return;
 	}
 
-	/* Reset ring + counters. */
+	/* Reset ring + counters + held-state tracker. */
 	pthread_mutex_lock(&g_il.push_mtx);
 	g_il.head = 0;
 	g_il.tail = 0;
 	g_il.total_events = 0;
 	g_il.dropped = 0;
+	g_il.deduped = 0;
+	g_il.held_n = 0;
 	pthread_mutex_unlock(&g_il.push_mtx);
 
 	os_atomic_store_bool(&g_il.writer_should_exit, false);
@@ -367,10 +436,12 @@ void input_logger_stop(void)
 	pthread_mutex_lock(&g_il.push_mtx);
 	uint64_t total = g_il.total_events;
 	uint64_t dropped = g_il.dropped;
+	uint64_t deduped = g_il.deduped;
 	pthread_mutex_unlock(&g_il.push_mtx);
 
-	obs_log(LOG_INFO, "Input logger stopped: %llu events, %llu dropped -> %s", (unsigned long long)total,
-		(unsigned long long)dropped, g_il.out_path ? g_il.out_path : "(no file)");
+	obs_log(LOG_INFO, "Input logger stopped: %llu events, %llu dropped, %llu deduped -> %s",
+		(unsigned long long)total, (unsigned long long)dropped, (unsigned long long)deduped,
+		g_il.out_path ? g_il.out_path : "(no file)");
 
 	bfree(g_il.out_path);
 	g_il.out_path = NULL;
