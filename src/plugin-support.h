@@ -27,12 +27,14 @@ extern "C" {
 #include <stdarg.h>
 #include <string.h>
 
-/* blogva is declared (with proper EXPORT/dllimport linkage) by
- * <obs-module.h> -> <util/base.h>. Do NOT redeclare it here. */
-
 extern const char *PLUGIN_NAME;
 extern const char *PLUGIN_VERSION;
 
+/* Forwards to blogva() with a [PLUGIN_NAME]-prefixed format.
+ * blogva itself is declared by <obs-module.h>/<util/base.h> with platform-
+ * correct dllimport/visibility linkage — don't redeclare it here, because
+ * sources that include both this header and <obs-module.h> would otherwise
+ * see two declarations with conflicting linkage (MSVC C2375). */
 void obs_log(int log_level, const char *format, ...);
 
 #ifdef __cplusplus

@@ -17,6 +17,12 @@ add_library(${CMAKE_PROJECT_NAME} MODULE)
 find_package(libobs REQUIRED)
 target_link_libraries(${CMAKE_PROJECT_NAME} PRIVATE OBS::libobs)
 
+# plugin-support is auto-created in cmake/common/helpers_common.cmake; give it
+# libobs headers so plugin-support.c can include <obs-module.h> for blogva().
+if(TARGET plugin-support)
+  target_link_libraries(plugin-support PRIVATE OBS::libobs)
+endif()
+
 find_package(obs-frontend-api REQUIRED)
 target_link_libraries(${CMAKE_PROJECT_NAME} PRIVATE OBS::obs-frontend-api)
 
