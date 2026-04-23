@@ -71,14 +71,23 @@ jobs:
           if (-not $iscc -or -not (Test-Path $iscc)) {
             throw "Inno Setup (ISCC.exe) not found on this runner."
           }
-          # Absolute paths avoid Inno's relative-path surprises.
+          # Write ISCC defines to a file so we don't have to deal with pwsh
+          # argument tokenization of /D flags containing colons/backslashes.
           $outDir  = Join-Path (Get-Location) "release"
           $staging = (Resolve-Path "release\staging").Path
           $null = New-Item -ItemType Directory -Force -Path $outDir
-          & $iscc "/DMyAppVersion=$env:VERSION" "/DStagingDir=$staging" "/O$outDir" "installer\obs-input-logger.iss"
+
+          $defines = @"
+#define MyAppVersion "$env:VERSION"
+#define StagingDir "$staging"
+"@
+          Set-Content -Path "installer\defines.isi" -Value $defines -Encoding ASCII
+          Get-Content "installer\defines.isi"
+
+          & $iscc "/O$outDir" "installer\obs-input-logger.iss"
           if ($LASTEXITCODE -ne 0) { throw "ISCC failed with code $LASTEXITCODE" }
 
-          Get-ChildItem release\*.exe
+          Get-ChildItem $outDir\*.exe
 
       - name: Upload installer 📡
         uses: actions/upload-artifact@v4
