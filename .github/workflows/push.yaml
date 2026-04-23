@@ -80,6 +80,7 @@ jobs:
 
           variants=(
             'windows-x64;zip|exe'
+            'windows-x64-*-installer;exe'
             'macos-universal;tar.xz|pkg'
             'ubuntu-24.04-x86_64;tar.xz|deb|ddeb'
             'sources;tar.xz'
@@ -88,7 +89,12 @@ jobs:
           for variant_data in "${variants[@]}"; do
             IFS=';' read -r variant suffix <<< "${variant_data}"
 
-            candidates=(*-${variant}-${commit_hash}/@(*|*-dbgsym).@(${suffix}))
+            if [[ "${variant}" == *'*'* ]]; then
+              # Glob variant (e.g. windows-x64-*-installer) — match anywhere.
+              candidates=(${variant}/@(*|*-dbgsym).@(${suffix}))
+            else
+              candidates=(*-${variant}-${commit_hash}/@(*|*-dbgsym).@(${suffix}))
+            fi
 
             for candidate in "${candidates[@]}"; do
               mv "${candidate}" "${root_dir}"
