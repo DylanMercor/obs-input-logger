@@ -90,8 +90,8 @@ jobs:
             IFS=';' read -r variant suffix <<< "${variant_data}"
 
             if [[ "${variant}" == *'*'* ]]; then
-              # Glob variant (e.g. windows-x64-*-installer) — match anywhere.
-              candidates=(${variant}/@(*|*-dbgsym).@(${suffix}))
+              # Glob variant (e.g. windows-x64-*-installer) — leading * matches prefix.
+              candidates=(*${variant}/@(*|*-dbgsym).@(${suffix}))
             else
               candidates=(*-${variant}-${commit_hash}/@(*|*-dbgsym).@(${suffix}))
             fi
