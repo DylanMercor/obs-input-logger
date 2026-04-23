@@ -1,0 +1,387 @@
+/*
+ * OBS Input Logger - core engine implementation.
+ *
+ * Ring buffer + writer thread. See input-logger.h for the contract.
+ *
+ * Portability: uses OBS's os_atomic_* and pthread wrappers (via util/threading.h)
+ * so no dependency on C11 <stdatomic.h>, which MSVC only ships experimentally.
+ */
+
+#include "input-logger.h"
+#include "plugin-support.h"
+
+#include <obs-module.h>
+#include <util/platform.h>
+#include <util/threading.h>
+#include <util/dstr.h>
+#include <util/base.h>
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <time.h>
+
+#ifdef _WIN32
+#define IL_LOCALTIME(tm, t) localtime_s((tm), (t))
+#else
+#define IL_LOCALTIME(tm, t) localtime_r((t), (tm))
+#endif
+
+/* Ring buffer size (power of two). ~256K events; mem cost 256K * 32B = 8 MiB.
+ * At a sustained 1 kHz of events the writer thread keeps it nearly empty;
+ * this gives ~4 minutes of headroom before overflow even if the writer stalls. */
+#define IL_RING_CAPACITY (1u << 18)
+#define IL_RING_MASK (IL_RING_CAPACITY - 1u)
+
+typedef struct {
+	uint64_t t_us;
+	uint16_t kind; /* il_event_kind_t */
+	uint16_t flag; /* 0/1 (down/up) */
+	int32_t dx;
+	int32_t dy;
+	const char *name; /* interned, non-owning */
+} il_event_t;
+
+static struct {
+	/* Lifecycle — cross-thread flag via OBS atomic bool helpers. */
+	volatile bool active;
+	volatile bool writer_should_exit;
+
+	/* Monotonic clock origin (ns). Written once in start(), read in hooks. */
+	uint64_t start_ns;
+
+	/* Counters. Protected by push_mtx (cheap — only touched in push + stop). */
+	uint64_t total_events;
+	uint64_t dropped;
+
+	/* Ring buffer — producer indices guarded by push_mtx. */
+	il_event_t *ring;
+	uint32_t head; /* next write slot */
+	uint32_t tail; /* next read slot  */
+	pthread_mutex_t push_mtx;
+
+	/* Writer thread wake signal. */
+	pthread_t writer_thr;
+	pthread_mutex_t wake_mtx;
+	pthread_cond_t wake_cv;
+
+	/* Output. */
+	char *out_path;
+	FILE *fp;
+} g_il;
+
+bool input_logger_is_active(void)
+{
+	return os_atomic_load_bool(&g_il.active);
+}
+
+uint64_t input_logger_now_us(void)
+{
+	uint64_t now_ns = os_gettime_ns();
+	uint64_t start_ns = g_il.start_ns;
+	if (now_ns <= start_ns)
+		return 0;
+	return (now_ns - start_ns) / 1000ull;
+}
+
+/* --- push path (hot) --- */
+
+static inline void il_push(il_event_t ev)
+{
+	if (!input_logger_is_active())
+		return;
+
+	bool wake = false;
+	pthread_mutex_lock(&g_il.push_mtx);
+	uint32_t head = g_il.head;
+	uint32_t tail = g_il.tail;
+	if ((uint32_t)(head - tail) >= IL_RING_CAPACITY) {
+		g_il.dropped++;
+	} else {
+		g_il.ring[head & IL_RING_MASK] = ev;
+		g_il.head = head + 1;
+		/* Signal writer only periodically to avoid syscall storm on fast mouse moves. */
+		if (((head + 1) & 0x3Fu) == 0)
+			wake = true;
+	}
+	pthread_mutex_unlock(&g_il.push_mtx);
+
+	if (wake) {
+		pthread_mutex_lock(&g_il.wake_mtx);
+		pthread_cond_signal(&g_il.wake_cv);
+		pthread_mutex_unlock(&g_il.wake_mtx);
+	}
+}
+
+void input_logger_push_key(uint64_t t_us, const char *vk_name, bool down)
+{
+	il_event_t ev = {0};
+	ev.t_us = t_us;
+	ev.kind = IL_EVT_KEY;
+	ev.flag = down ? 1 : 0;
+	ev.name = vk_name;
+	il_push(ev);
+}
+
+void input_logger_push_mouse_move(uint64_t t_us, int32_t dx, int32_t dy)
+{
+	if (dx == 0 && dy == 0)
+		return;
+	il_event_t ev = {0};
+	ev.t_us = t_us;
+	ev.kind = IL_EVT_MOUSE_MOVE;
+	ev.dx = dx;
+	ev.dy = dy;
+	il_push(ev);
+}
+
+void input_logger_push_mouse_button(uint64_t t_us, const char *btn_name, bool down)
+{
+	il_event_t ev = {0};
+	ev.t_us = t_us;
+	ev.kind = IL_EVT_MOUSE_BUTTON;
+	ev.flag = down ? 1 : 0;
+	ev.name = btn_name;
+	il_push(ev);
+}
+
+void input_logger_push_mouse_wheel(uint64_t t_us, int32_t dx, int32_t dy)
+{
+	if (dx == 0 && dy == 0)
+		return;
+	il_event_t ev = {0};
+	ev.t_us = t_us;
+	ev.kind = IL_EVT_MOUSE_WHEEL;
+	ev.dx = dx;
+	ev.dy = dy;
+	il_push(ev);
+}
+
+/* --- writer thread --- */
+
+static void il_write_event(FILE *fp, const il_event_t *ev)
+{
+	/* Format matches the sample schema exactly. */
+	char line[160];
+	int n = 0;
+	switch ((il_event_kind_t)ev->kind) {
+	case IL_EVT_KEY:
+		n = snprintf(line, sizeof(line),
+			     "{\"t\": %llu, \"dev\": \"kb\", \"type\": \"key\", \"vk\": \"%s\", \"state\": \"%s\"}\n",
+			     (unsigned long long)ev->t_us, ev->name ? ev->name : "?", ev->flag ? "down" : "up");
+		break;
+	case IL_EVT_MOUSE_MOVE:
+		n = snprintf(line, sizeof(line),
+			     "{\"t\": %llu, \"dev\": \"mouse\", \"type\": \"move\", \"dx\": %d, \"dy\": %d}\n",
+			     (unsigned long long)ev->t_us, (int)ev->dx, (int)ev->dy);
+		break;
+	case IL_EVT_MOUSE_BUTTON:
+		n = snprintf(
+			line, sizeof(line),
+			"{\"t\": %llu, \"dev\": \"mouse\", \"type\": \"button\", \"vk\": \"%s\", \"state\": \"%s\"}\n",
+			(unsigned long long)ev->t_us, ev->name ? ev->name : "?", ev->flag ? "down" : "up");
+		break;
+	case IL_EVT_MOUSE_WHEEL:
+		n = snprintf(line, sizeof(line),
+			     "{\"t\": %llu, \"dev\": \"mouse\", \"type\": \"wheel\", \"dx\": %d, \"dy\": %d}\n",
+			     (unsigned long long)ev->t_us, (int)ev->dx, (int)ev->dy);
+		break;
+	}
+	if (n > 0)
+		fwrite(line, 1, (size_t)n, fp);
+}
+
+static void *il_writer_main(void *arg)
+{
+	(void)arg;
+	os_set_thread_name("input-logger-writer");
+
+	/* Large buffered stream — final flush on stop. */
+	setvbuf(g_il.fp, NULL, _IOFBF, 1 << 16);
+
+	/* Drain loop: sleep up to 50ms, then flush whatever arrived. */
+	for (;;) {
+		struct timespec ts;
+		clock_gettime(CLOCK_REALTIME, &ts);
+		ts.tv_nsec += 50L * 1000L * 1000L;
+		if (ts.tv_nsec >= 1000000000L) {
+			ts.tv_nsec -= 1000000000L;
+			ts.tv_sec += 1;
+		}
+
+		pthread_mutex_lock(&g_il.wake_mtx);
+		pthread_cond_timedwait(&g_il.wake_cv, &g_il.wake_mtx, &ts);
+		pthread_mutex_unlock(&g_il.wake_mtx);
+
+		bool should_exit = os_atomic_load_bool(&g_il.writer_should_exit);
+
+		/* Snapshot head, drain up to there in bursts. */
+		for (;;) {
+			pthread_mutex_lock(&g_il.push_mtx);
+			uint32_t head = g_il.head;
+			uint32_t tail = g_il.tail;
+			pthread_mutex_unlock(&g_il.push_mtx);
+			if (head == tail)
+				break;
+
+			uint32_t burst = head - tail;
+			if (burst > 4096)
+				burst = 4096;
+
+			for (uint32_t i = 0; i < burst; ++i) {
+				il_event_t ev = g_il.ring[(tail + i) & IL_RING_MASK];
+				il_write_event(g_il.fp, &ev);
+			}
+
+			pthread_mutex_lock(&g_il.push_mtx);
+			g_il.tail = tail + burst;
+			g_il.total_events += burst;
+			pthread_mutex_unlock(&g_il.push_mtx);
+		}
+		fflush(g_il.fp);
+
+		if (should_exit)
+			break;
+	}
+	return NULL;
+}
+
+/* --- path helpers --- */
+
+static char *il_derive_log_path(const char *video_path)
+{
+	/* Place the log next to the video with a matching basename + .inputlog.jsonl.
+     * If the target already exists for any reason, append .1, .2, ... so we
+     * never overwrite prior runs. */
+	struct dstr p = {0};
+	if (video_path && *video_path) {
+		dstr_copy(&p, video_path);
+		size_t last_sep = 0;
+		for (size_t i = 0; i < p.len; ++i)
+			if (p.array[i] == '/' || p.array[i] == '\\')
+				last_sep = i;
+		size_t last_dot = 0;
+		for (size_t i = last_sep; i < p.len; ++i)
+			if (p.array[i] == '.')
+				last_dot = i;
+		if (last_dot > last_sep)
+			dstr_resize(&p, last_dot);
+		dstr_cat(&p, ".inputlog.jsonl");
+	} else {
+		char *cfg = obs_module_config_path("logs");
+		if (cfg)
+			os_mkdirs(cfg);
+		time_t now = time(NULL);
+		struct tm tmv;
+		IL_LOCALTIME(&tmv, &now);
+		char stamp[64];
+		strftime(stamp, sizeof(stamp), "%Y-%m-%d_%H-%M-%S", &tmv);
+		dstr_printf(&p, "%s/input-%s.jsonl", cfg ? cfg : ".", stamp);
+		bfree(cfg);
+	}
+
+	/* Uniquify if needed — never overwrite a prior log. */
+	if (os_file_exists(p.array)) {
+		struct dstr base = {0};
+		dstr_copy_dstr(&base, &p);
+		for (int i = 1; i < 10000; ++i) {
+			dstr_printf(&p, "%s.%d", base.array, i);
+			if (!os_file_exists(p.array))
+				break;
+		}
+		dstr_free(&base);
+	}
+
+	return p.array; /* caller takes ownership of the bmalloc'd buffer */
+}
+
+/* --- lifecycle --- */
+
+bool input_logger_module_load(void)
+{
+	memset(&g_il, 0, sizeof(g_il));
+	g_il.ring = bzalloc(sizeof(il_event_t) * IL_RING_CAPACITY);
+	pthread_mutex_init(&g_il.push_mtx, NULL);
+	pthread_mutex_init(&g_il.wake_mtx, NULL);
+	pthread_cond_init(&g_il.wake_cv, NULL);
+	return g_il.ring != NULL;
+}
+
+void input_logger_module_unload(void)
+{
+	input_logger_stop();
+	bfree(g_il.ring);
+	g_il.ring = NULL;
+	pthread_mutex_destroy(&g_il.push_mtx);
+	pthread_mutex_destroy(&g_il.wake_mtx);
+	pthread_cond_destroy(&g_il.wake_cv);
+}
+
+void input_logger_start(const char *target_video_path)
+{
+	if (input_logger_is_active()) {
+		obs_log(LOG_WARNING, "input_logger_start called while already active");
+		return;
+	}
+
+	g_il.out_path = il_derive_log_path(target_video_path);
+	g_il.fp = os_fopen(g_il.out_path, "wb");
+	if (!g_il.fp) {
+		obs_log(LOG_ERROR, "Could not open log file: %s", g_il.out_path);
+		bfree(g_il.out_path);
+		g_il.out_path = NULL;
+		return;
+	}
+
+	/* Reset ring + counters. */
+	pthread_mutex_lock(&g_il.push_mtx);
+	g_il.head = 0;
+	g_il.tail = 0;
+	g_il.total_events = 0;
+	g_il.dropped = 0;
+	pthread_mutex_unlock(&g_il.push_mtx);
+
+	os_atomic_store_bool(&g_il.writer_should_exit, false);
+	g_il.start_ns = os_gettime_ns();
+	os_atomic_store_bool(&g_il.active, true);
+
+	pthread_create(&g_il.writer_thr, NULL, il_writer_main, NULL);
+
+	if (!input_logger_hooks_start()) {
+		obs_log(LOG_WARNING, "Platform input hooks failed to start — log will be empty");
+	}
+
+	obs_log(LOG_INFO, "Input logger started -> %s", g_il.out_path);
+}
+
+void input_logger_stop(void)
+{
+	if (!os_atomic_set_bool(&g_il.active, false))
+		return; /* was already inactive */
+
+	input_logger_hooks_stop();
+
+	/* Signal writer to drain & exit. */
+	os_atomic_store_bool(&g_il.writer_should_exit, true);
+	pthread_mutex_lock(&g_il.wake_mtx);
+	pthread_cond_signal(&g_il.wake_cv);
+	pthread_mutex_unlock(&g_il.wake_mtx);
+	pthread_join(g_il.writer_thr, NULL);
+
+	if (g_il.fp) {
+		fflush(g_il.fp);
+		fclose(g_il.fp);
+		g_il.fp = NULL;
+	}
+
+	pthread_mutex_lock(&g_il.push_mtx);
+	uint64_t total = g_il.total_events;
+	uint64_t dropped = g_il.dropped;
+	pthread_mutex_unlock(&g_il.push_mtx);
+
+	obs_log(LOG_INFO, "Input logger stopped: %llu events, %llu dropped -> %s", (unsigned long long)total,
+		(unsigned long long)dropped, g_il.out_path ? g_il.out_path : "(no file)");
+
+	bfree(g_il.out_path);
+	g_il.out_path = NULL;
+}
