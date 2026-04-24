@@ -30,21 +30,22 @@
   #sync { display: inline-flex; gap: 6px; align-items: center; }
   #sync input { width: 80px; background: var(--panel2); color: var(--text); border: 1px solid #2a3140;
     border-radius: 4px; padding: 4px 6px; font-family: ui-monospace, Menlo, Consolas, monospace; }
-  main { display: grid; grid-template-columns: 1fr 360px; gap: 12px; padding: 12px; height: calc(100% - 54px); }
+  main { display: grid; grid-template-columns: 1fr 380px; gap: 12px; padding: 12px; height: calc(100% - 54px); }
   .videoWrap { position: relative; background: #000; border-radius: 8px; overflow: hidden; min-height: 300px;
     display: flex; align-items: center; justify-content: center; }
   video { max-width: 100%; max-height: 100%; display: block; }
   .hudRight { display: flex; flex-direction: column; gap: 12px; overflow: hidden; }
   .panel { background: var(--panel); border-radius: 8px; padding: 10px 12px; border: 1px solid #242a35; }
   .panel h2 { margin: 0 0 8px; font-size: 11px; font-weight: 600; color: var(--muted); letter-spacing: .5px;
-    text-transform: uppercase; }
+    text-transform: uppercase; display: flex; justify-content: space-between; align-items: center; }
+  .panel h2 .controls { display: flex; gap: 8px; align-items: center; text-transform: none; letter-spacing: 0; font-weight: 400; }
+  .panel h2 input[type=range] { accent-color: var(--mouse); width: 100px; }
   .keyboard { display: grid; grid-template-columns: repeat(12, 1fr); gap: 3px; }
   .key { background: var(--key); padding: 6px 0; border-radius: 4px; text-align: center; font-family:
     ui-monospace, Menlo, Consolas, monospace; font-size: 11px; color: var(--muted); border: 1px solid #242a35; }
   .key.active { background: var(--key-active); color: #000; border-color: var(--key-active); font-weight: 700; }
-  .mouseArea { position: relative; height: 160px; background: var(--panel2); border-radius: 6px; overflow: hidden; }
-  .mouseDot { position: absolute; width: 10px; height: 10px; border-radius: 50%; background: var(--mouse);
-    box-shadow: 0 0 10px var(--mouse); transform: translate(-50%, -50%); transition: left 30ms linear, top 30ms linear; }
+  .mouseArea { position: relative; height: 260px; background: var(--panel2); border-radius: 6px; overflow: hidden; }
+  .mouseArea canvas { position: absolute; inset: 0; width: 100%; height: 100%; }
   .btnRow { display: flex; gap: 6px; margin-top: 8px; font-family: ui-monospace, Menlo, Consolas, monospace;
     font-size: 11px; }
   .btn { flex: 1; background: var(--key); color: var(--muted); padding: 4px 0; text-align: center;
@@ -56,8 +57,8 @@
   .eventLog .row.kb { color: #ffd479; }
   .eventLog .row.mb { color: var(--mouse); }
   .eventLog .row.mm { color: #8a93a6; }
-  .stats { display: grid; grid-template-columns: 1fr 1fr; gap: 4px 12px; font-family: ui-monospace, Menlo,
-    Consolas, monospace; font-size: 11px; }
+  .stats { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 4px 12px; font-family: ui-monospace, Menlo,
+    Consolas, monospace; font-size: 11px; margin-top: 8px; }
   .stats div span { color: var(--muted); }
   .empty { color: var(--muted); padding: 20px; text-align: center; }
 </style>
@@ -90,9 +91,16 @@
       <div class="keyboard" id="kb"></div>
     </section>
     <section class="panel">
-      <h2>Mouse</h2>
+      <h2>
+        Mouse
+        <span class="controls">
+          <label for="zoom" style="color:var(--muted)">zoom</label>
+          <input id="zoom" type="range" min="-3" max="1" step="0.1" value="-1" title="Pixels per delta count (log scale)">
+          <span id="zoomValue" style="color:var(--muted); min-width: 3em; text-align: right;">0.10×</span>
+        </span>
+      </h2>
       <div class="mouseArea" id="mouseArea">
-        <div class="mouseDot" id="mouseDot" style="left:50%; top:50%"></div>
+        <canvas id="trail"></canvas>
       </div>
       <div class="btnRow">
         <div class="btn" data-btn="mouse_left">L</div>
@@ -101,9 +109,10 @@
         <div class="btn" data-btn="mouse_x1">X1</div>
         <div class="btn" data-btn="mouse_x2">X2</div>
       </div>
-      <div class="stats" style="margin-top:8px">
+      <div class="stats">
         <div><span>dx/s</span> <b id="statDx">0</b></div>
         <div><span>dy/s</span> <b id="statDy">0</b></div>
+        <div><span>events/s</span> <b id="statRate">0</b></div>
       </div>
     </section>
     <section class="panel" style="display:flex; flex-direction:column; flex:1; min-height:0;">
@@ -119,9 +128,36 @@ let video = document.getElementById('video');
 let offsetInput = document.getElementById('offset');
 let eventLog = document.getElementById('eventLog');
 let kbEl = document.getElementById('kb');
-let dot = document.getElementById('mouseDot');
 let statDx = document.getElementById('statDx');
 let statDy = document.getElementById('statDy');
+let statRate = document.getElementById('statRate');
+let zoomEl = document.getElementById('zoom');
+let zoomValueEl = document.getElementById('zoomValue');
+
+// Mouse visualization — a canvas-based fading trail anchored at center, with
+// spring-decay back to origin so fast flicks don't permanently push the dot
+// off the viewport. "zoom" = pixels per HID count, tunable via slider.
+let zoom = Math.pow(10, parseFloat(zoomEl.value)); // default 0.1 px / count
+const canvas = document.getElementById('trail');
+const ctx = canvas.getContext('2d');
+let cursorX = 0, cursorY = 0;           // integrated position in pixels, relative to center
+let lastDrawPoint = null;                // last point drawn on trail
+
+function resizeCanvas() {
+  const r = canvas.getBoundingClientRect();
+  const dpr = window.devicePixelRatio || 1;
+  canvas.width  = Math.max(1, Math.round(r.width  * dpr));
+  canvas.height = Math.max(1, Math.round(r.height * dpr));
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+}
+new ResizeObserver(resizeCanvas).observe(document.getElementById('mouseArea'));
+resizeCanvas();
+
+zoomEl.addEventListener('input', () => {
+  zoom = Math.pow(10, parseFloat(zoomEl.value));
+  zoomValueEl.textContent = zoom.toFixed(zoom < 0.1 ? 3 : 2) + '×';
+});
+zoomValueEl.textContent = zoom.toFixed(2) + '×';
 
 // Build a compact on-screen keyboard (rows mirror a common 60%)
 const KB_ROWS = [
@@ -155,7 +191,12 @@ document.getElementById('jsonlInput').addEventListener('change', async e => {
   events = [];
   for (const line of text.split(/\r?\n/)) {
     if (!line.trim()) continue;
-    try { events.push(JSON.parse(line)); } catch {}
+    try {
+      const o = JSON.parse(line);
+      // Skip the optional v0.4.0+ header line (has "meta" but no "t").
+      if (typeof o.t !== 'number') continue;
+      events.push(o);
+    } catch {}
   }
   events.sort((a,b) => a.t - b.t);
   document.getElementById('jsonlName').textContent = `${f.name} — ${events.length} events`;
@@ -163,14 +204,11 @@ document.getElementById('jsonlInput').addEventListener('change', async e => {
 });
 
 // ---------- playback driver ----------
-// Strategy: every animation frame, compute current video time (µs), then replay
-// every event between lastIdx and the new target index. This keeps the display
-// perfectly in sync with seeking, pausing, and playback-rate changes.
 
 let lastIdx = 0;
 let lastTimeUs = -1;
-let moveAccumDx = 0, moveAccumDy = 0, moveAccumLast = 0;
-const held = new Set();     // currently-down keys/buttons
+let moveAccumDx = 0, moveAccumDy = 0, eventAccum = 0, moveAccumLast = 0;
+const held = new Set();
 const recentRows = [];
 
 function videoTimeUs() {
@@ -178,7 +216,6 @@ function videoTimeUs() {
 }
 
 function findIdxAt(tUs) {
-  // binary search — first event with t > tUs
   let lo = 0, hi = events.length;
   while (lo < hi) {
     const m = (lo + hi) >> 1;
@@ -191,12 +228,13 @@ function resetToTime(tUs) {
   held.clear();
   for (const el of Object.values(keyEls)) el.classList.remove('active');
   for (const el of Object.values(btnEls)) el.classList.remove('active');
-  // Replay all state-changing events up to tUs so key-held state is correct.
+  // Replay state-changing events up to tUs so key-held display is correct.
   const end = findIdxAt(tUs);
   for (let i = 0; i < end; i++) apply(events[i], /*silent=*/true);
   lastIdx = end;
-  dot.style.left = '50%'; dot.style.top = '50%';
-  // keep recentRows as-is
+  cursorX = cursorY = 0;
+  lastDrawPoint = null;
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
 }
 
 function apply(ev, silent) {
@@ -211,20 +249,37 @@ function apply(ev, silent) {
     }
     if (!silent) pushRow(ev);
   } else if (ev.type === 'move') {
-    // Integrate deltas into an on-screen dot within a 160×160 area.
-    const area = document.getElementById('mouseArea').getBoundingClientRect();
-    const w = area.width, h = area.height;
-    const x = parseFloat(dot.style.left) / 100 * w + ev.dx;
-    const y = parseFloat(dot.style.top)  / 100 * h + ev.dy;
-    // Clamp + wrap softly back toward center
-    const nx = Math.max(4, Math.min(w - 4, x));
-    const ny = Math.max(4, Math.min(h - 4, y));
-    dot.style.left = (nx / w * 100) + '%';
-    dot.style.top  = (ny / h * 100) + '%';
+    // Integrate deltas (scaled by zoom) into a cursor position. Draw a trail
+    // segment from previous point to new point. Clamp position so we never
+    // leave the box — but the clamp is generous because zoom keeps magnitudes
+    // small enough that normal gameplay stays well inside.
+    const w = canvas.clientWidth, h = canvas.clientHeight;
+    if (w === 0) return;
+    cursorX += ev.dx * zoom;
+    cursorY += ev.dy * zoom;
+    const maxX = w * 0.48, maxY = h * 0.48;
+    if (cursorX >  maxX) cursorX =  maxX;
+    if (cursorX < -maxX) cursorX = -maxX;
+    if (cursorY >  maxY) cursorY =  maxY;
+    if (cursorY < -maxY) cursorY = -maxY;
+
+    if (!silent) {
+      const px = w/2 + cursorX, py = h/2 + cursorY;
+      if (lastDrawPoint) {
+        ctx.strokeStyle = 'rgba(123, 228, 149, 0.75)';
+        ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        ctx.moveTo(lastDrawPoint.x, lastDrawPoint.y);
+        ctx.lineTo(px, py);
+        ctx.stroke();
+      }
+      lastDrawPoint = {x: px, y: py};
+    }
     moveAccumDx += ev.dx; moveAccumDy += ev.dy;
   } else if (ev.type === 'wheel') {
     if (!silent) pushRow(ev);
   }
+  eventAccum++;
 }
 
 function pushRow(ev) {
@@ -244,10 +299,40 @@ function pushRow(ev) {
   eventLog.scrollTop = eventLog.scrollHeight;
 }
 
+function fadeTrail() {
+  // Per-frame fade of the mouse trail canvas — older strokes dim out.
+  ctx.globalCompositeOperation = 'destination-in';
+  ctx.fillStyle = 'rgba(0,0,0,0.94)';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.globalCompositeOperation = 'source-over';
+
+  // Draw crosshair (stable overlay, thin lines at box center).
+  const w = canvas.clientWidth, h = canvas.clientHeight;
+  if (w > 0) {
+    ctx.strokeStyle = 'rgba(138, 147, 166, 0.18)';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(0, h/2); ctx.lineTo(w, h/2);
+    ctx.moveTo(w/2, 0); ctx.lineTo(w/2, h);
+    ctx.stroke();
+  }
+  // Draw current dot.
+  if (lastDrawPoint) {
+    ctx.fillStyle = '#7be495';
+    ctx.beginPath();
+    ctx.arc(w/2 + cursorX, h/2 + cursorY, 3, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  // Gentle spring back to center so the dot doesn't park against a wall when
+  // the user flicks and stops. About ~1s time constant.
+  cursorX *= 0.96;
+  cursorY *= 0.96;
+}
+
 function frame() {
   if (events.length) {
     const tUs = videoTimeUs();
-    // Seek backward? — rebuild state.
     if (tUs < lastTimeUs - 50_000) {
       resetToTime(tUs);
     } else {
@@ -257,15 +342,16 @@ function frame() {
     }
     lastTimeUs = tUs;
 
-    // dx/dy per-second readout (updated ~5Hz)
     if (performance.now() - moveAccumLast > 200) {
       const dt = (performance.now() - moveAccumLast) / 1000;
       statDx.textContent = Math.round(moveAccumDx / dt);
       statDy.textContent = Math.round(moveAccumDy / dt);
-      moveAccumDx = moveAccumDy = 0;
+      statRate.textContent = Math.round(eventAccum / dt);
+      moveAccumDx = moveAccumDy = eventAccum = 0;
       moveAccumLast = performance.now();
     }
   }
+  fadeTrail();
   requestAnimationFrame(frame);
 }
 
