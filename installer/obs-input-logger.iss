@@ -34,6 +34,10 @@ DirExistsWarning=no
 AppendDefaultDirName=no
 PrivilegesRequired=admin
 OutputBaseFilename=obs-input-logger-{#MyAppVersion}-windows-x64-setup
+; Mark as a 64-bit installer so {commonpf} resolves to "C:\Program Files"
+; (the 64-bit OBS location), not "C:\Program Files (x86)".
+ArchitecturesInstallIn64BitMode=x64
+ArchitecturesAllowed=x64
 Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern
