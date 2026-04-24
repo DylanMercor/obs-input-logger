@@ -1,14 +1,11 @@
-; Inno Setup script — builds a double-click Windows installer for obs-input-logger.
+; Inno Setup script — Windows installer for obs-input-logger.
 ;
-; Install target (per-user, no admin):
-;   %APPDATA%\obs-studio\plugins\obs-input-logger\bin\64bit\obs-input-logger.dll
-;   %APPDATA%\obs-studio\plugins\obs-input-logger\data\locale\en-US.ini
+; Installs directly into the OBS installation folder (system-wide):
+;   C:\Program Files\obs-studio\obs-plugins\64bit\obs-input-logger.dll
+;   C:\Program Files\obs-studio\data\obs-plugins\obs-input-logger\locale\en-US.ini
 ;
-; The installer also:
-;   - Refuses to run while OBS is open (old DLL stays locked otherwise).
-;   - Detects a stale copy of obs-input-logger.dll under Program Files\obs-studio
-;     (left over from a prior manual install). Warns and offers to delete it,
-;     which requires a UAC elevation prompt.
+; This is where OBS reliably scans on all setups we've seen. Requires
+; admin elevation — installer triggers one UAC prompt at launch.
 
 #ifexist "defines.isi"
   #include "defines.isi"
@@ -28,94 +25,55 @@ AppName=OBS Input Logger
 AppVersion={#MyAppVersion}
 AppPublisher=Dylan
 AppPublisherURL=https://github.com/DylanMercor/obs-input-logger
-DefaultDirName={userappdata}\obs-studio\plugins\obs-input-logger
-DefaultGroupName=OBS Input Logger
-DisableDirPage=yes
+; System-wide install into the OBS install folder. Dir page lets advanced
+; users point at a non-default OBS install (e.g. D:\obs-studio).
+DefaultDirName={commonpf}\obs-studio
+DisableDirPage=no
 DisableProgramGroupPage=yes
-PrivilegesRequired=lowest
+DirExistsWarning=no
+AppendDefaultDirName=no
+PrivilegesRequired=admin
 OutputBaseFilename=obs-input-logger-{#MyAppVersion}-windows-x64-setup
 Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern
 UninstallDisplayName=OBS Input Logger {#MyAppVersion}
-UninstallDisplayIcon={app}\bin\64bit\obs-input-logger.dll
+UninstallDisplayIcon={app}\obs-plugins\64bit\obs-input-logger.dll
 ; Close OBS automatically if it's running so our DLL isn't file-locked.
 CloseApplications=force
 RestartApplications=no
 
 [Files]
-Source: "{#StagingDir}\bin\64bit\obs-input-logger.dll"; DestDir: "{app}\bin\64bit"; Flags: ignoreversion
-Source: "{#StagingDir}\bin\64bit\obs-input-logger.pdb"; DestDir: "{app}\bin\64bit"; Flags: ignoreversion skipifsourcedoesntexist
-Source: "{#StagingDir}\data\*";                        DestDir: "{app}\data";      Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "{#StagingDir}\bin\64bit\obs-input-logger.dll"; DestDir: "{app}\obs-plugins\64bit"; Flags: ignoreversion
+Source: "{#StagingDir}\bin\64bit\obs-input-logger.pdb"; DestDir: "{app}\obs-plugins\64bit"; Flags: ignoreversion skipifsourcedoesntexist
+Source: "{#StagingDir}\data\*";                        DestDir: "{app}\data\obs-plugins\obs-input-logger"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [InstallDelete]
-; Clean up any pre-existing per-user install tree from earlier layouts.
-Type: filesandordirs; Name: "{userappdata}\obs-studio\plugins\obs-input-logger\bin"
-Type: filesandordirs; Name: "{userappdata}\obs-studio\plugins\obs-input-logger\data"
-Type: filesandordirs; Name: "{userappdata}\obs-studio\plugins\obs-input-logger\obs-plugins"
+; Clean out any prior per-user install from 0.2.0–0.4.0 — those placed the DLL
+; in %APPDATA%\obs-studio\plugins\obs-input-logger\ which OBS didn't find on
+; the target system. Remove so there's only one copy of the plugin.
+Type: filesandordirs; Name: "{userappdata}\obs-studio\plugins\obs-input-logger"
 
 [UninstallDelete]
-Type: filesandordirs; Name: "{app}"
+Type: filesandordirs; Name: "{app}\obs-plugins\64bit\obs-input-logger.dll"
+Type: filesandordirs; Name: "{app}\obs-plugins\64bit\obs-input-logger.pdb"
+Type: filesandordirs; Name: "{app}\data\obs-plugins\obs-input-logger"
 
 [Code]
-// Common locations where older manually-copied DLLs could hide and take load
-// precedence over our per-user install. We scan these on install and warn.
-function StaleSystemwideFound(): Boolean;
-begin
-  Result :=
-    FileExists(ExpandConstant('{commonpf}\obs-studio\obs-plugins\64bit\obs-input-logger.dll')) or
-    DirExists (ExpandConstant('{commonpf}\obs-studio\data\obs-plugins\obs-input-logger')) or
-    FileExists(ExpandConstant('{commonpf32}\obs-studio\obs-plugins\64bit\obs-input-logger.dll')) or
-    DirExists (ExpandConstant('{commonpf32}\obs-studio\data\obs-plugins\obs-input-logger'));
-end;
-
-procedure TryDeleteStaleSystemwide();
+function InitializeSetup(): Boolean;
 var
-  ResultCode: Integer;
-  Paths: array[0..3] of string;
-  I: Integer;
-  Cmd, Args: string;
+  ObsExe: string;
 begin
-  Paths[0] := ExpandConstant('{commonpf}\obs-studio\obs-plugins\64bit\obs-input-logger.dll');
-  Paths[1] := ExpandConstant('{commonpf}\obs-studio\data\obs-plugins\obs-input-logger');
-  Paths[2] := ExpandConstant('{commonpf32}\obs-studio\obs-plugins\64bit\obs-input-logger.dll');
-  Paths[3] := ExpandConstant('{commonpf32}\obs-studio\data\obs-plugins\obs-input-logger');
-
-  // Build a batch of deletions and invoke one elevated cmd.exe so the user
-  // only sees a single UAC prompt.
-  Args := '/C ';
-  for I := 0 to 3 do
-  begin
-    if FileExists(Paths[I]) then
-      Args := Args + 'del /f /q "' + Paths[I] + '" & ';
-    if DirExists(Paths[I]) then
-      Args := Args + 'rmdir /s /q "' + Paths[I] + '" & ';
-  end;
-  Args := Args + 'exit /b 0';
-
-  Cmd := ExpandConstant('{cmd}');
-  if not ShellExec('runas', Cmd, Args, '', SW_HIDE, ewWaitUntilTerminated, ResultCode) then
-    MsgBox('Could not remove the stale system-wide DLL. Please delete these manually:' + #13#10 +
-           Paths[0] + #13#10 + Paths[1] + #13#10 + Paths[2] + #13#10 + Paths[3],
+  Result := True;
+  // If the default directory doesn't contain obs64.exe, warn — user probably
+  // installed OBS somewhere non-standard and needs to point us at it.
+  ObsExe := ExpandConstant('{commonpf}\obs-studio\bin\64bit\obs64.exe');
+  if not FileExists(ObsExe) then
+    MsgBox('OBS Studio was not found at ' + ExpandConstant('{commonpf}\obs-studio') + '.' + #13#10 + #13#10 +
+           'On the next screen, please point the installer at your OBS install folder ' +
+           '(the folder that contains the "bin" and "data" subfolders).',
            mbInformation, MB_OK);
 end;
 
-procedure CurStepChanged(CurStep: TSetupStep);
-begin
-  if CurStep = ssInstall then
-  begin
-    if StaleSystemwideFound() then
-    begin
-      if MsgBox(
-           'An older copy of obs-input-logger is installed under Program Files\obs-studio. ' +
-           'OBS loads that one instead of the new per-user install, which is why you may be ' +
-           'seeing old behavior.' + #13#10 + #13#10 +
-           'Delete the stale copy now? (Windows will prompt for admin permission.)',
-           mbConfirmation, MB_YESNO) = IDYES then
-        TryDeleteStaleSystemwide();
-    end;
-  end;
-end;
-
 [Messages]
-WelcomeLabel2=This will install [name/ver] into your personal OBS Studio plugins folder.%n%nAfter the installer finishes, start OBS and open the Tools menu — you'll see "Input Logger: Enabled". Each recording will produce a .inputlog.jsonl file next to the video.%n%nNo administrator password needed for the install itself.
+WelcomeLabel2=This will install [name/ver] into your OBS Studio folder.%n%nWindows will ask for administrator permission — that's required to write into Program Files.%n%nAfter the installer finishes, start OBS and open the Tools menu — you'll see "Input Logger: Enabled". Each recording will produce a .inputlog.jsonl file next to the video.

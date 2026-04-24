@@ -38,7 +38,7 @@
     },
     "name": "obs-input-logger",
     "displayName": "Input Logger",
-    "version": "0.4.0",
+    "version": "0.5.0",
     "author": "Dylan",
     "website": "https://github.com/DylanMercor/obs-input-logger",
     "email": "unset@example.com"
