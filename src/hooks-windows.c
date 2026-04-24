@@ -195,10 +195,11 @@ static void il_handle_raw_mouse(const RAWMOUSE *m)
 	}
 
 	/* Motion. Raw Input reports relative deltas for normal mice
-	 * (MOUSE_MOVE_RELATIVE — the default). If a device ever reports
-	 * absolute coords (rare — touch digitizers, some VMs), skip it;
-	 * our schema is defined in device-relative deltas. */
-	if ((m->usFlags & 1 /* MOUSE_MOVE_ABSOLUTE */) == 0) {
+	 * (usFlags == MOUSE_MOVE_RELATIVE == 0, the default). Absolute-mode
+	 * devices (touch digitizers, some VMs, Remote Desktop) report screen
+	 * coords in lLastX/lLastY; our schema is strictly device-relative, so
+	 * we skip those rather than emit misleading deltas. */
+	if ((m->usFlags & MOUSE_MOVE_ABSOLUTE) == 0) {
 		if (m->lLastX != 0 || m->lLastY != 0)
 			input_logger_push_mouse_move(t, (int32_t)m->lLastX, (int32_t)m->lLastY);
 	}
@@ -207,17 +208,29 @@ static void il_handle_raw_mouse(const RAWMOUSE *m)
 static LRESULT CALLBACK il_wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 {
 	if (msg == WM_INPUT) {
-		UINT size = 0;
-		GetRawInputData((HRAWINPUT)lp, RID_INPUT, NULL, &size, sizeof(RAWINPUTHEADER));
-		if (size > 0 && size <= 1024) {
-			BYTE buf[1024];
-			if (GetRawInputData((HRAWINPUT)lp, RID_INPUT, buf, &size, sizeof(RAWINPUTHEADER)) == size) {
-				RAWINPUT *ri = (RAWINPUT *)buf;
-				if (ri->header.dwType == RIM_TYPEMOUSE)
-					il_handle_raw_mouse(&ri->data.mouse);
-			}
-		}
-		return 0; /* handled — let default cleanup run via DefWindowProc too */
+		/* MSDN: call GetRawInputData twice. The first call with pData=NULL
+		 * writes the required size into *pcbSize. Reset pcbSize between
+		 * calls — GetRawInputData is documented to update it both ways. */
+		UINT needed = 0;
+		if (GetRawInputData((HRAWINPUT)lp, RID_INPUT, NULL, &needed, sizeof(RAWINPUTHEADER)) == (UINT)-1)
+			goto done;
+		if (needed == 0 || needed > 1024) /* sanity cap; typical RAWMOUSE is ~40B */
+			goto done;
+
+		BYTE buf[1024];
+		UINT cb = sizeof(buf);
+		UINT got = GetRawInputData((HRAWINPUT)lp, RID_INPUT, buf, &cb, sizeof(RAWINPUTHEADER));
+		if (got == (UINT)-1 || got < sizeof(RAWINPUTHEADER))
+			goto done;
+
+		RAWINPUT *ri = (RAWINPUT *)buf;
+		if (ri->header.dwType == RIM_TYPEMOUSE)
+			il_handle_raw_mouse(&ri->data.mouse);
+	done:
+		/* MSDN REQUIRES DefWindowProc for WM_INPUT so the OS can close the
+		 * RAWINPUT handle. Skipping this leaks kernel handles per event —
+		 * at 1 kHz that crashes OBS within minutes. Return its value too. */
+		return DefWindowProcW(hwnd, msg, wp, lp);
 	}
 	return DefWindowProcW(hwnd, msg, wp, lp);
 }
