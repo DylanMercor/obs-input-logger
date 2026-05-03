@@ -81,6 +81,12 @@ static struct {
 	il_held_t held[IL_HELD_MAX];
 	int held_n;
 
+	/* Last absolute mouse position emitted; used to drop redundant samples
+	 * from the idle-tick path. Guarded by push_mtx. */
+	int32_t last_pos_x;
+	int32_t last_pos_y;
+	uint8_t last_pos_valid;
+
 	/* Writer thread wake signal (OBS portable event — works on MSVC/mingw/clang). */
 	pthread_t writer_thr;
 	os_event_t *wake_evt;
@@ -220,6 +226,30 @@ void input_logger_push_mouse_wheel(uint64_t t_us, int32_t dx, int32_t dy)
 	il_push(ev);
 }
 
+void input_logger_push_mouse_pos(uint64_t t_us, int32_t x, int32_t y)
+{
+	/* Drop redundant samples (same coords as the last one we emitted) so a
+	 * mouse held perfectly still during a flurry of non-motion mouse events
+	 * doesn't pad the log. `last_pos_valid` starts as 0 each session — see
+	 * input_logger_start(). */
+	pthread_mutex_lock(&g_il.push_mtx);
+	if (g_il.last_pos_valid && g_il.last_pos_x == x && g_il.last_pos_y == y) {
+		pthread_mutex_unlock(&g_il.push_mtx);
+		return;
+	}
+	g_il.last_pos_x = x;
+	g_il.last_pos_y = y;
+	g_il.last_pos_valid = 1;
+	pthread_mutex_unlock(&g_il.push_mtx);
+
+	il_event_t ev = {0};
+	ev.t_us = t_us;
+	ev.kind = IL_EVT_MOUSE_POS;
+	ev.dx = x;
+	ev.dy = y;
+	il_push(ev);
+}
+
 /* --- writer thread --- */
 
 static void il_write_event(FILE *fp, const il_event_t *ev)
@@ -247,6 +277,12 @@ static void il_write_event(FILE *fp, const il_event_t *ev)
 	case IL_EVT_MOUSE_WHEEL:
 		n = snprintf(line, sizeof(line),
 			     "{\"t\": %llu, \"dev\": \"mouse\", \"type\": \"wheel\", \"dx\": %d, \"dy\": %d}\n",
+			     (unsigned long long)ev->t_us, (int)ev->dx, (int)ev->dy);
+		break;
+	case IL_EVT_MOUSE_POS:
+		/* Absolute screen-space cursor position. dx/dy slots reused for x/y. */
+		n = snprintf(line, sizeof(line),
+			     "{\"t\": %llu, \"dev\": \"mouse\", \"type\": \"pos\", \"x\": %d, \"y\": %d}\n",
 			     (unsigned long long)ev->t_us, (int)ev->dx, (int)ev->dy);
 		break;
 	}
@@ -420,6 +456,9 @@ void input_logger_start(const char *target_video_path)
 	g_il.dropped = 0;
 	g_il.deduped = 0;
 	g_il.held_n = 0;
+	g_il.last_pos_valid = 0;
+	g_il.last_pos_x = 0;
+	g_il.last_pos_y = 0;
 	pthread_mutex_unlock(&g_il.push_mtx);
 
 	os_atomic_store_bool(&g_il.writer_should_exit, false);

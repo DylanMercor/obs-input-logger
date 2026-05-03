@@ -203,6 +203,14 @@ static void il_handle_raw_mouse(const RAWMOUSE *m)
 		if (m->lLastX != 0 || m->lLastY != 0)
 			input_logger_push_mouse_move(t, (int32_t)m->lLastX, (int32_t)m->lLastY);
 	}
+
+	/* Absolute cursor position. Raw Input doesn't carry one (it's HID-level
+	 * device data), so we ask the OS for the current cursor location. This
+	 * is virtual-screen pixels, so multi-monitor setups give consistent
+	 * coords across the whole desktop. */
+	POINT cp;
+	if (GetCursorPos(&cp))
+		input_logger_push_mouse_pos(t, (int32_t)cp.x, (int32_t)cp.y);
 }
 
 static LRESULT CALLBACK il_wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)

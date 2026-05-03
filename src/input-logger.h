@@ -31,6 +31,7 @@ typedef enum {
 	IL_EVT_MOUSE_MOVE = 2,
 	IL_EVT_MOUSE_BUTTON = 3,
 	IL_EVT_MOUSE_WHEEL = 4,
+	IL_EVT_MOUSE_POS = 5,
 } il_event_kind_t;
 
 /* Called once when the module loads. Returns false on unrecoverable error. */
@@ -64,6 +65,13 @@ void input_logger_push_key(uint64_t t_us, const char *vk_name, bool down);
 void input_logger_push_mouse_move(uint64_t t_us, int32_t dx, int32_t dy);
 void input_logger_push_mouse_button(uint64_t t_us, const char *btn_name, bool down);
 void input_logger_push_mouse_wheel(uint64_t t_us, int32_t dx, int32_t dy);
+/* Absolute cursor position in virtual-desktop pixel coordinates. Emitted
+ * alongside every mouse event (move/click/scroll) so the log always carries
+ * a current cursor location. Coordinate space is whatever the OS reports for
+ * the global cursor (Windows: virtual-screen px;
+ * macOS: global display points with origin at upper-left of the main display).
+ */
+void input_logger_push_mouse_pos(uint64_t t_us, int32_t x, int32_t y);
 
 /* Platform hook lifecycle — implemented in hooks-<platform>.{c,m}. */
 bool input_logger_hooks_start(void);

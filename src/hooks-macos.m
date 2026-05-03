@@ -196,6 +196,29 @@ static CGEventRef il_tap_cb(CGEventTapProxy proxy, CGEventType type, CGEventRef 
 
     uint64_t t = input_logger_now_us();
 
+    /* For any mouse event, capture the cursor location. CGEventGetLocation
+     * works on every CGEvent, including clicks/scrolls — this guarantees
+     * button events always carry a position context, not just motion. */
+    switch (type) {
+        case kCGEventMouseMoved:
+        case kCGEventLeftMouseDragged:
+        case kCGEventRightMouseDragged:
+        case kCGEventOtherMouseDragged:
+        case kCGEventLeftMouseDown:
+        case kCGEventLeftMouseUp:
+        case kCGEventRightMouseDown:
+        case kCGEventRightMouseUp:
+        case kCGEventOtherMouseDown:
+        case kCGEventOtherMouseUp:
+        case kCGEventScrollWheel: {
+            CGPoint p = CGEventGetLocation(event);
+            input_logger_push_mouse_pos(t, (int32_t) p.x, (int32_t) p.y);
+            break;
+        }
+        default:
+            break;
+    }
+
     switch (type) {
         case kCGEventKeyDown:
         case kCGEventKeyUp: {
@@ -246,6 +269,8 @@ static CGEventRef il_tap_cb(CGEventTapProxy proxy, CGEventType type, CGEventRef 
             int64_t dx = CGEventGetIntegerValueField(event, kCGMouseEventDeltaX);
             int64_t dy = CGEventGetIntegerValueField(event, kCGMouseEventDeltaY);
             input_logger_push_mouse_move(t, (int32_t) dx, (int32_t) dy);
+            /* Absolute position already emitted by the top-level mouse-event
+             * pos switch above; no need to repeat here. */
             break;
         }
         case kCGEventLeftMouseDown:

@@ -46,6 +46,8 @@
   .key.active { background: var(--key-active); color: #000; border-color: var(--key-active); font-weight: 700; }
   .mouseArea { position: relative; height: 260px; background: var(--panel2); border-radius: 6px; overflow: hidden; }
   .mouseArea canvas { position: absolute; inset: 0; width: 100%; height: 100%; }
+  .screenMap { position: relative; height: 140px; background: var(--panel2); border-radius: 6px; overflow: hidden; }
+  .screenMap canvas { position: absolute; inset: 0; width: 100%; height: 100%; }
   .btnRow { display: flex; gap: 6px; margin-top: 8px; font-family: ui-monospace, Menlo, Consolas, monospace;
     font-size: 11px; }
   .btn { flex: 1; background: var(--key); color: var(--muted); padding: 4px 0; text-align: center;
@@ -113,6 +115,17 @@
         <div><span>dx/s</span> <b id="statDx">0</b></div>
         <div><span>dy/s</span> <b id="statDy">0</b></div>
         <div><span>events/s</span> <b id="statRate">0</b></div>
+        <div><span>pos x</span> <b id="statPosX">—</b></div>
+        <div><span>pos y</span> <b id="statPosY">—</b></div>
+        <div><span>screen</span> <b id="statScreen">—</b></div>
+      </div>
+    </section>
+    <section class="panel">
+      <h2>Absolute position
+        <span class="controls" style="color:var(--muted)">virtual desktop</span>
+      </h2>
+      <div class="screenMap" id="screenMap">
+        <canvas id="screen"></canvas>
       </div>
     </section>
     <section class="panel" style="display:flex; flex-direction:column; flex:1; min-height:0;">
@@ -133,6 +146,27 @@ let statDy = document.getElementById('statDy');
 let statRate = document.getElementById('statRate');
 let zoomEl = document.getElementById('zoom');
 let zoomValueEl = document.getElementById('zoomValue');
+let statPosX = document.getElementById('statPosX');
+let statPosY = document.getElementById('statPosY');
+let statScreen = document.getElementById('statScreen');
+
+// Absolute mouse position state. `screenBBox` is the bounding box of every
+// {type:"pos"} event in the loaded log — used as the virtual-desktop extent
+// for the mini-map. We don't know the real monitor size so we infer it from
+// where the cursor actually went, padded slightly.
+let absX = null, absY = null;
+let screenBBox = null;  // {minX, minY, maxX, maxY}
+const screenCanvas = document.getElementById('screen');
+const sctx = screenCanvas.getContext('2d');
+function resizeScreenCanvas() {
+  const r = screenCanvas.getBoundingClientRect();
+  const dpr = window.devicePixelRatio || 1;
+  screenCanvas.width  = Math.max(1, Math.round(r.width  * dpr));
+  screenCanvas.height = Math.max(1, Math.round(r.height * dpr));
+  sctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+}
+new ResizeObserver(resizeScreenCanvas).observe(document.getElementById('screenMap'));
+resizeScreenCanvas();
 
 // Mouse visualization — a canvas-based fading trail anchored at center, with
 // spring-decay back to origin so fast flicks don't permanently push the dot
@@ -199,6 +233,30 @@ document.getElementById('jsonlInput').addEventListener('change', async e => {
     } catch {}
   }
   events.sort((a,b) => a.t - b.t);
+
+  // Compute screen bounding box from all absolute-position samples. Pad
+  // 5% so the cursor never sits exactly on the edge. If no pos events
+  // (older v0.5.x logs), bbox stays null and the mini-map shows a hint.
+  screenBBox = null;
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity, posCount = 0;
+  for (const e of events) {
+    if (e.type === 'pos') {
+      if (e.x < minX) minX = e.x;
+      if (e.y < minY) minY = e.y;
+      if (e.x > maxX) maxX = e.x;
+      if (e.y > maxY) maxY = e.y;
+      posCount++;
+    }
+  }
+  if (posCount > 0) {
+    const padX = Math.max(20, (maxX - minX) * 0.05);
+    const padY = Math.max(20, (maxY - minY) * 0.05);
+    screenBBox = { minX: minX - padX, minY: minY - padY, maxX: maxX + padX, maxY: maxY + padY };
+    statScreen.textContent = `${Math.round(maxX-minX)}×${Math.round(maxY-minY)} px`;
+  } else {
+    statScreen.textContent = '(no pos events)';
+  }
+
   document.getElementById('jsonlName').textContent = `${f.name} — ${events.length} events`;
   eventLog.innerHTML = '';
 });
@@ -228,7 +286,8 @@ function resetToTime(tUs) {
   held.clear();
   for (const el of Object.values(keyEls)) el.classList.remove('active');
   for (const el of Object.values(btnEls)) el.classList.remove('active');
-  // Replay state-changing events up to tUs so key-held display is correct.
+  absX = absY = null;
+  // Replay state-changing events up to tUs so key-held + pos display are correct.
   const end = findIdxAt(tUs);
   for (let i = 0; i < end; i++) apply(events[i], /*silent=*/true);
   lastIdx = end;
@@ -278,6 +337,10 @@ function apply(ev, silent) {
     moveAccumDx += ev.dx; moveAccumDy += ev.dy;
   } else if (ev.type === 'wheel') {
     if (!silent) pushRow(ev);
+  } else if (ev.type === 'pos') {
+    // Absolute screen-space cursor position. Update the readout + mini-map.
+    // No row in the event log per pos sample (would dominate at 5+ Hz).
+    absX = ev.x; absY = ev.y;
   }
   eventAccum++;
 }
@@ -330,6 +393,58 @@ function fadeTrail() {
   cursorY *= 0.96;
 }
 
+function drawScreenMap() {
+  const w = screenCanvas.clientWidth, h = screenCanvas.clientHeight;
+  if (w === 0 || h === 0) return;
+  sctx.clearRect(0, 0, screenCanvas.width, screenCanvas.height);
+
+  // Frame around the entire mapped area.
+  sctx.strokeStyle = 'rgba(138, 147, 166, 0.25)';
+  sctx.lineWidth = 1;
+  sctx.strokeRect(0.5, 0.5, w - 1, h - 1);
+
+  if (!screenBBox) {
+    sctx.fillStyle = 'rgba(138, 147, 166, 0.55)';
+    sctx.font = '11px ui-monospace, Menlo, Consolas, monospace';
+    sctx.textAlign = 'center';
+    sctx.textBaseline = 'middle';
+    sctx.fillText('No absolute-position events in this log.', w / 2, h / 2 - 7);
+    sctx.fillText('Record with v0.6.0+ to see cursor position.', w / 2, h / 2 + 7);
+    return;
+  }
+
+  // Map screen-space coords to canvas coords with letterboxing so we don't
+  // distort aspect ratio (otherwise a 16:9 desktop drawn into a 7:1 panel
+  // looks like the mouse is teleporting vertically).
+  const sw = screenBBox.maxX - screenBBox.minX;
+  const sh = screenBBox.maxY - screenBBox.minY;
+  const margin = 6;
+  const aw = w - margin * 2, ah = h - margin * 2;
+  const scale = Math.min(aw / sw, ah / sh);
+  const dw = sw * scale, dh = sh * scale;
+  const ox = margin + (aw - dw) / 2, oy = margin + (ah - dh) / 2;
+
+  sctx.fillStyle = 'rgba(78, 160, 255, 0.06)';
+  sctx.fillRect(ox, oy, dw, dh);
+  sctx.strokeStyle = 'rgba(78, 160, 255, 0.35)';
+  sctx.strokeRect(ox + 0.5, oy + 0.5, dw - 1, dh - 1);
+
+  if (absX != null) {
+    const px = ox + (absX - screenBBox.minX) * scale;
+    const py = oy + (absY - screenBBox.minY) * scale;
+    // Crosshair + dot.
+    sctx.strokeStyle = 'rgba(123, 228, 149, 0.35)';
+    sctx.beginPath();
+    sctx.moveTo(ox, py); sctx.lineTo(ox + dw, py);
+    sctx.moveTo(px, oy); sctx.lineTo(px, oy + dh);
+    sctx.stroke();
+    sctx.fillStyle = '#7be495';
+    sctx.beginPath();
+    sctx.arc(px, py, 4, 0, Math.PI * 2);
+    sctx.fill();
+  }
+}
+
 function frame() {
   if (events.length) {
     const tUs = videoTimeUs();
@@ -347,11 +462,14 @@ function frame() {
       statDx.textContent = Math.round(moveAccumDx / dt);
       statDy.textContent = Math.round(moveAccumDy / dt);
       statRate.textContent = Math.round(eventAccum / dt);
+      statPosX.textContent = absX != null ? absX : '—';
+      statPosY.textContent = absY != null ? absY : '—';
       moveAccumDx = moveAccumDy = eventAccum = 0;
       moveAccumLast = performance.now();
     }
   }
   fadeTrail();
+  drawScreenMap();
   requestAnimationFrame(frame);
 }
 
